@@ -1,0 +1,10 @@
+{
+    "baseUrl": "https://my-rc.com",
+    "repo": "https://github.com/user/rocket-chat-history.git",
+    "channels": [
+        "general",
+        "random"
+    ],
+    "historyDays": 365,
+    "dmLimit": 100
+}
