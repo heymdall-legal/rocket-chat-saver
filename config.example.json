@@ -1,6 +1,6 @@
 {
     "baseUrl": "https://my-rc.com",
-    "repo": "https://github.com/user/rocket-chat-history.git",
+    "outputDir": "./export",
     "channels": [
         "general",
         "random"

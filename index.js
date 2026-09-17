@@ -1,7 +1,5 @@
-import { readFileSync, mkdtempSync, appendFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 const configPath = process.argv[2];
 if (!configPath) {
@@ -16,10 +14,16 @@ try {
     console.error(`Failed to read config: ${err.message}`);
     process.exit(1);
 }
-const { baseUrl, repo, channels = [], historyDays, dmLimit = 100 } = config;
+const {
+    baseUrl,
+    channels = [],
+    historyDays,
+    dmLimit = 100,
+    outputDir = './export',
+} = config;
 
-if (!baseUrl || !repo || !historyDays) {
-    console.error('Config must include: baseUrl, repo, historyDays');
+if (!baseUrl || !historyDays) {
+    console.error('Config must include: baseUrl, historyDays');
     process.exit(1);
 }
 if (!channels.length && !dmLimit) {
@@ -29,51 +33,15 @@ if (!channels.length && !dmLimit) {
 
 const rcToken = process.env.RC_TOKEN;
 const userId = process.env.RC_USER_ID;
-const ghToken = process.env.GH_TOKEN;
 if (!rcToken || !userId) {
     console.error('Set RC_TOKEN and RC_USER_ID environment variables');
     process.exit(1);
 }
-if (!ghToken) {
-    console.error('Set GH_TOKEN environment variable');
-    process.exit(1);
-}
-const PREFIX = 'rocket-saver'
-const authUrl = buildAuthUrl(repo, ghToken);
-const outDir = mkdtempSync(join(tmpdir(), `${PREFIX}`));
-console.log(`Cloning ${repo} ...`);
-try {
-    git(['clone', '--depth', '1', authUrl, outDir], undefined, ghToken);
-} catch (err) {
-    console.error(`Failed to clone repo: ${err.message}`);
-    process.exit(1);
-}
+const outDir = resolve(outputDir);
+mkdirSync(outDir, { recursive: true });
+console.log(`Saving chats to: ${outDir}`);
 
 const headers = { 'X-Auth-Token': rcToken, 'X-User-Id': userId };
-
-function sanitizeGitError(err, token) {
-    const msg = err.stderr?.toString() || err.message || String(err);
-    return msg.replaceAll(token, '***');
-}
-
-function git(args, cwd, ghToken) {
-    try {
-        return execFileSync('git', args, {
-            cwd,
-            stdio: ['ignore', 'pipe', 'pipe'],
-            env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-        }).toString().trim();
-    } catch (err) {
-        throw new Error(sanitizeGitError(err, ghToken));
-    }
-}
-
-function buildAuthUrl(repo, token) {
-    const url = new URL(repo);
-    url.username = 'x-access-token';
-    url.password = token;
-    return url.toString();
-}
 
 async function apiCall(path) {
     await new Promise(r => setTimeout(r, 200));
@@ -122,17 +90,6 @@ async function fetchThread(messageId) {
     return data.messages || [];
 }
 
-function getLastTimestamp(filePath) {
-    try {
-        const content = readFileSync(filePath, 'utf-8');
-        const matches = [...content.matchAll(/```\ndate: (.+)\nauthor: .+\nmsgId: .+\n```/g)];
-        if (matches.length === 0) return null;
-        return matches[matches.length - 1][1];
-    } catch {
-        return null;
-    }
-}
-
 function formatMessage(msg, thread) {
     let md = '';
     md += '```\n';
@@ -159,6 +116,12 @@ function formatMessage(msg, thread) {
     return md;
 }
 
+function saveMarkdown(filePath, markdown) {
+    const temporaryPath = `${filePath}.${process.pid}.tmp`;
+    writeFileSync(temporaryPath, markdown);
+    renameSync(temporaryPath, filePath);
+}
+
 const cutoffDate = new Date();
 cutoffDate.setDate(cutoffDate.getDate() - historyDays);
 const cutoff = cutoffDate.toISOString();
@@ -168,25 +131,8 @@ for (const channelName of channels) {
     try {
         const channel = await resolveChannel(channelName);
         const filePath = join(outDir, `${channel.name}.md`);
-
-        const lastTs = getLastTimestamp(filePath);
-        let oldest = cutoff;
-        if (lastTs && lastTs > cutoff) {
-            // Bump by 1ms to avoid re-fetching the last saved message
-            const d = new Date(lastTs);
-            d.setMilliseconds(d.getMilliseconds() + 1);
-            oldest = d.toISOString();
-        }
-
-        const messages = await fetchMessages(channel.id, channel.type, oldest);
-        if (messages.length === 0) {
-            console.log(`  No new messages`);
-            continue;
-        }
-
-        if (!existsSync(filePath)) {
-            appendFileSync(filePath, `# ${channel.name}\n\n`);
-        }
+        const messages = await fetchMessages(channel.id, channel.type, cutoff);
+        let markdown = `# ${channel.name}\n\n`;
 
         let threadCount = 0;
         let saved = 0;
@@ -199,10 +145,11 @@ for (const channelName of channels) {
                 thread = await fetchThread(msg._id);
                 threadCount++;
             }
-            appendFileSync(filePath, formatMessage(msg, thread));
+            markdown += formatMessage(msg, thread);
             saved++;
         }
 
+        saveMarkdown(filePath, markdown);
         console.log(`  Saved ${saved} messages (${threadCount} with threads), skipped ${messages.length - saved} system`);
     } catch (err) {
         console.error(`  Error processing ${channelName}: ${err.message}`);
@@ -231,24 +178,8 @@ if (dmLimit > 0) {
 
             try {
                 const filePath = join(outDir, `dm-${otherUsername}.md`);
-
-                const lastTs = getLastTimestamp(filePath);
-                let oldest = cutoff;
-                if (lastTs && lastTs > cutoff) {
-                    const d = new Date(lastTs);
-                    d.setMilliseconds(d.getMilliseconds() + 1);
-                    oldest = d.toISOString();
-                }
-
-                const messages = await fetchMessages(room._id, 'im', oldest);
-                if (messages.length === 0) {
-                    console.log(`  No new messages`);
-                    continue;
-                }
-
-                if (!existsSync(filePath)) {
-                    appendFileSync(filePath, `# DM with ${otherUsername}\n\n`);
-                }
+                const messages = await fetchMessages(room._id, 'im', cutoff);
+                let markdown = `# DM with ${otherUsername}\n\n`;
 
                 let threadCount = 0;
                 let saved = 0;
@@ -260,10 +191,11 @@ if (dmLimit > 0) {
                         thread = await fetchThread(msg._id);
                         threadCount++;
                     }
-                    appendFileSync(filePath, formatMessage(msg, thread));
+                    markdown += formatMessage(msg, thread);
                     saved++;
                 }
 
+                saveMarkdown(filePath, markdown);
                 console.log(`  Saved ${saved} messages (${threadCount} with threads), skipped ${messages.length - saved} system`);
             } catch (err) {
                 console.error(`  Error processing DM ${otherUsername}: ${err.message}`);
@@ -272,27 +204,6 @@ if (dmLimit > 0) {
     } catch (err) {
         console.error(`Failed to discover DMs: ${err.message}`);
     }
-}
-
-// Check for changes and push
-const status = git(['status', '--porcelain'], outDir, ghToken);
-if (status) {
-    console.log('Committing and pushing changes...');
-    const date = new Date().toISOString().split('T')[0];
-    git(['add', '.'], outDir, ghToken);
-    git(
-        ['-c', `user.name=${PREFIX}`, '-c', `user.email=${PREFIX}@noreply`, 'commit', '-m', `Update ${date}`],
-        outDir,
-        ghToken
-    );
-    try {
-        git(['push'], outDir, ghToken);
-        console.log('Pushed successfully');
-    } catch (err) {
-        console.error(`Failed to push: ${err.message}`);
-    }
-} else {
-    console.log('No changes to push');
 }
 
 console.log('Done');
