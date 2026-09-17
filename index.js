@@ -1,6 +1,9 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
+// наш чат использует серты минцифры
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 const configPath = process.argv[2];
 if (!configPath) {
     console.error('Usage: node index.js <config.json>');
