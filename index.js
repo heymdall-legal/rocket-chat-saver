@@ -53,15 +53,64 @@ async function apiCall(path) {
     return res.json();
 }
 
+// Replacement for resolveChannel() in rocket-chat-saver/index.js.
+// It resolves both public channels and private groups by display name
+// and then uses the internal Rocket.Chat room ID.
+
+let roomCache;
+
 async function resolveChannel(name) {
     try {
-        const data = await apiCall(`channels.info?roomName=${encodeURIComponent(name)}`);
-        return { id: data.channel._id, type: 'channels', name: data.channel.name };
+        const data = await apiCall(
+            `channels.info?roomName=${encodeURIComponent(name)}`
+        );
+
+        return {
+            id: data.channel._id,
+            type: 'channels',
+            name: data.channel.name,
+        };
     } catch (err) {
-        if (!err.message.includes('400') && !err.message.includes('404')) throw err;
-        const data = await apiCall(`groups.info?roomName=${encodeURIComponent(name)}`);
-        return { id: data.group._id, type: 'groups', name: data.group.name };
+        if (!err.message.includes('400') && !err.message.includes('404')) {
+            throw err;
+        }
     }
+
+    if (!roomCache) {
+        const [channelsData, groupsData] = await Promise.all([
+            apiCall('channels.list?count=100'),
+            apiCall('groups.list?count=100'),
+        ]);
+
+        roomCache = [
+            ...(channelsData.channels || []).map(room => ({
+                ...room,
+                type: 'channels',
+            })),
+            ...(groupsData.groups || []).map(room => ({
+                ...room,
+                type: 'groups',
+            })),
+        ];
+    }
+
+    const normalize = value =>
+        String(value || '').trim().toLocaleLowerCase('ru-RU');
+
+    const room = roomCache.find(room =>
+        normalize(room.name) === normalize(name) ||
+        normalize(room.fname) === normalize(name)
+    );
+
+    if (!room) {
+        throw new Error(`Room not found: ${name}`);
+    }
+
+    return {
+        id: room._id,
+        type: room.type,
+        name: room.name || room.fname || name,
+    };
 }
 
 async function fetchMessages(channelId, channelType, oldest) {
